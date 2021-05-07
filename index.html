@@ -1,0 +1,240 @@
+<html>
+	<meta charset="utf-8">
+	<head>
+		<title>ИМЯ СТУДЕНТА шейдеры</title>
+		<link rel="stylesheet" href="style.css" />
+
+		<!-- подключаем PIXI.js -->
+		<script type="text/javascript" src="libs/pixi3.js"></script>
+
+		<!-- шейдер дыма -->
+		<script id="smokeShader" type="shader">
+			precision mediump float;
+			uniform vec2 resolution;
+			uniform float time;
+			uniform float alpha;
+			uniform vec2 speed;
+			uniform float shift;
+
+			// возвращает случайное число с заданным сидом n
+			float rand(vec2 n) {
+				return fract(cos(dot(n, vec2(12.9898, 4.1414))) * 43758.5453);
+			}
+
+			float noise(vec2 n) {
+				// использует функцию сверху что бы сгенерировать шум
+				const vec2 d = vec2(0.0, 1.0);
+				vec2 b = floor(n), f = smoothstep(vec2(0.0), vec2(1.0), fract(n));
+				return mix(mix(rand(b), rand(b + d.yx), f.x), mix(rand(b + d.xy), rand(b + d.yy), f.x), f.y);
+			}
+
+			float fbm(vec2 n) {
+				// функция взята отсюда - https://en.wikipedia.org/wiki/Fractional_Brownian_motion
+				float total = 0.0, amplitude = 1.0;
+				for (int i = 0; i < 4; i++) {
+					total += noise(n) * amplitude;
+					n += n;
+					amplitude *= 0.5;
+				}
+				return total;
+			}
+
+			void main() {
+				// здесь проводятся основный расчёты
+				const vec3 c1 = vec3(126.0/255.0, 0.0/255.0, 97.0/255.0);
+				const vec3 c2 = vec3(173.0/255.0, 0.0/255.0, 161.4/255.0);
+				const vec3 c3 = vec3(0.2, 0.0, 0.0);
+				const vec3 c4 = vec3(164.0/255.0, 1.0/255.0, 214.4/255.0);
+				const vec3 c5 = vec3(0.1);
+				const vec3 c6 = vec3(0.9);
+
+				// это то как дым наполняет холст, для понимания можно изменить 3.0 на 1.0
+				vec2 p = gl_FragCoord.xy * 3.0 / resolution.xx;
+				// Функция fbm принимает p в качестве сида (поэтому каждый пиксель выглядит по-разному) и время (поэтому он смещается со временем)
+				float q = fbm(p - time * 0.1);
+				vec2 r = vec2(fbm(p + q + time * speed.x - p.x - p.y), fbm(p + q - time * speed.y));
+				vec3 c = mix(c1, c2, fbm(p + r)) + mix(c3, c4, r.x) - mix(c5, c6, r.y);
+				float grad = gl_FragCoord.y / resolution.y;
+				gl_FragColor = vec4(c * cos(shift * gl_FragCoord.y / resolution.y) * 0.9, 1.0);
+				gl_FragColor.xyz *= 1.0-grad;
+			}
+
+		</script>
+
+		<!-- шейдер радиального размытия -->
+		<script id="radialBlurShader" type="shader">
+			precision mediump float;
+
+			varying vec2 vTextureCoord;
+			varying vec4 vColor;
+			const int Quality = 16;
+
+			uniform sampler2D uSampler; // текстура
+
+			void main()
+			{
+				vec4 Color;
+				float v;
+				for (float i = 0.0; i < 1.0; i += 1.0 / float(Quality)) {
+					v = 0.9 + i * 0.1; // конвертирует "i" в диапазон [0.9] .. [1.0]
+
+					Color += texture2D( uSampler, vTextureCoord*v+0.5-0.5*v);
+				}
+
+				Color /= float(Quality);
+				gl_FragColor =  Color *  vColor;
+			}
+		</script>
+
+		<script id="textureViewShader" type="shader">
+			// это старый шейдер который просто выводит текстуру спрайта
+			precision mediump float;
+			varying vec2 vTextureCoord; // координаты текущего пикселя текстуры
+
+			uniform float time;
+			uniform sampler2D uSampler; // текущая текстура
+
+			void main() {
+				//gl_FragColor = vec4(sin(time), 0.0, 0.0, 1.0);
+
+				gl_FragColor = texture2D(uSampler, vTextureCoord);
+				gl_FragColor.b = 0.0;
+			}
+		</script>
+
+	</head>
+
+	<body>
+		<h1>Курсовая работа ИМЯ СТУДЕНТА</h1>
+		<br>
+		<a href="#" id="smoke_shader_switcher" onclick="switchSmoke()">Наложить шейдер дыма</a>
+		<br>
+		<a href="#" id="blur_shader_switcher" onclick="switchGausBlur()">Наложить шейдер - Гауссово Размытие</a>
+		<br>
+		<a href="#" id="radial_blur_shader_switcher" onclick="switchRadialBlur()">Наложить шейдер - Радиальное Размытие</a>
+		
+		<br>
+		<br>
+		
+		<script> 
+			var isSmokeShaderEnabled = false;
+			var isGausBlurEnabled = false;
+			var isRadialBlurEnabled = false;
+
+			// ширина / высота холста
+			var width = 870; //window.innerWidth;
+			var height = 620; //window.innerHeight;
+
+			// получаем доступный браузеру рендерер
+			var renderer = new PIXI.autoDetectRenderer(width, height);
+
+			// добавляем рендерер на страницу
+			document.body.appendChild(renderer.view);
+
+			// главный контейнер который будет содержать все элементы нашей сцены
+			var stage = new PIXI.Container();
+
+			// получаем код шейдера в виде строки
+			var smokeShaderCode = document.getElementById("smokeShader").innerHTML;
+			var radialBlurShaderCode = document.getElementById("radialBlurShader").innerHTML;
+
+			// uniform переменные шейдера дыма
+			// в pixi js их можно передавать в таком виде
+			var smokeUniforms = {};
+			smokeUniforms.resolution = { type: 'v2', value: { x: width, y: height}};
+			smokeUniforms.alpha = { type: '1f', value: 1.0};
+			smokeUniforms.shift = { type: '1f', value: 1.6};
+			smokeUniforms.time = {type: '1f',value: 0};
+			smokeUniforms.speed = {type: 'v2', value: {x: 0.7, y: 0.4}};
+
+			// добавляем наш шейдер в виде pixi фильтра
+			var smokeShader = new PIXI.AbstractFilter('', smokeShaderCode, smokeUniforms);
+			var radialBlurShader = new PIXI.AbstractFilter('', radialBlurShaderCode);
+			// шейдер гауссового размытия уже встроен в библиотеку
+			var gausBlurShader = new PIXI.filters.BlurFilter(8, 1);
+			
+
+			// загружаем текстуру
+			var mainTexture = PIXI.Sprite.fromImage("tex.png");
+
+			// устанавливаем её позицию в центр холста
+			mainTexture.x = width / 2;
+			mainTexture.y = height / 2;
+
+			// задаём точку крепления текстуры к её центру, изначально берется левый верхний угол
+			mainTexture.anchor.set(0.5);
+
+			// старый тестовый код
+			// tex.filters = [smokeShader]
+			// tex.filters = [smokeShader, new PIXI.filters.BlurFilter(8, 1)]
+
+			// добавляем текстуру на сцену
+			stage.addChild(mainTexture);
+
+			function animate() {
+				// удаляем прошлый фильтры и смотрим изменились ли опции
+				mainTexture.filters = null; 
+
+				// массив активных фильтров
+				let activeFilters = [];
+
+				// добавляем шейдеры в зависимости от включенных опций
+				if (isSmokeShaderEnabled) activeFilters.push(smokeShader);
+				if (isGausBlurEnabled) activeFilters.push(gausBlurShader);
+				if (isRadialBlurEnabled) activeFilters.push(radialBlurShader);
+
+				// увеличиваем значение времени каждый тик на 0.01
+				smokeShader.uniforms.time.value += 0.01;
+
+				// если у нас есть активные фильтры, накладываем их на текстуру
+				if (activeFilters.length > 0) mainTexture.filters = activeFilters;
+
+				// запускаем анимацию
+				requestAnimationFrame(animate);
+				// рендерим нашу сцену
+				renderer.render(stage);
+
+			}
+			
+			// функции снизу меняют опции отображения шейдеров
+			// включить/выключить гауссово размытие
+			function switchGausBlur() { 
+				isGausBlurEnabled = !isGausBlurEnabled; 
+				let connectedA = document.getElementById('blur_shader_switcher');
+				if (isGausBlurEnabled) {
+					connectedA.innerHTML = 'Убрать шейдер - Гауссово Размытие';
+				} else {
+					connectedA.innerHTML = 'Наложить шейдер - Гауссово Размытие';
+				}
+			}
+
+			// включить/выключить радиальное размытие
+			function switchRadialBlur() {
+				isRadialBlurEnabled = !isRadialBlurEnabled;
+				let connectedA = document.getElementById('radial_blur_shader_switcher');
+				if (isRadialBlurEnabled) {
+					connectedA.innerHTML = 'Убрать шейдер - Радиальное Размытие';
+				} else {
+					connectedA.innerHTML = 'Наложить шейдер - Радиальное Размытие';
+				}
+			}
+
+			// включить/выключить шейдер дыма
+			function switchSmoke() { 
+				isSmokeShaderEnabled = !isSmokeShaderEnabled; 
+				let connectedA = document.getElementById('smoke_shader_switcher');
+				if (isSmokeShaderEnabled) {
+					connectedA.innerHTML = 'Убрать шейдер дыма';
+				} else {
+					connectedA.innerHTML = 'Наложить шейдер дыма';
+				}
+			}
+
+			// запускаем главную функцию
+			animate()
+
+		</script>
+
+		<h3>Используется библиотека PIXI.js 3</h3>
+	</body>
+</html>
